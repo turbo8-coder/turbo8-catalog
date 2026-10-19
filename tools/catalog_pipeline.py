@@ -18,7 +18,7 @@ import zipfile
 import zlib
 from pathlib import Path
 
-REPO = 'kanyarisamuel12-coder/turbo8-catalog'
+REPO = 'turbo8-coder/turbo8-catalog'
 MAX_EXPANDED = 64 * 1024 * 1024
 MAX_ZIP = 32 * 1024 * 1024
 MAX_FILES = 128
@@ -339,7 +339,7 @@ def build(root, output, publish=False):
 def verify_pages(expected):
     wanted = json.loads(expected.read_text())
     for attempt in range(12):
-        url = f'https://kanyarisamuel12-coder.github.io/turbo8-catalog/catalog-v2.json?revision={wanted["source_commit"]}&attempt={attempt}'
+        url = f'https://turbo8-coder.github.io/turbo8-catalog/catalog-v2.json?revision={wanted["source_commit"]}&attempt={attempt}'
         try:
             with urllib.request.urlopen(url, timeout=30) as response:
                 actual = json.loads(response.read(1024 * 1024))
