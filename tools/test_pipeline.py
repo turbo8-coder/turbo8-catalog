@@ -112,6 +112,46 @@ class ValidationTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'Unexpected API path'): p.api('https://example.com/token')
 
 
+class RenameEventTests(unittest.TestCase):
+    def fixture(self):
+        return {'number': 3, 'base': {'ref': 'main', 'repo': {'id': 12345, 'full_name': p.REPO}},
+                'head': {'sha': 'a' * 40, 'repo': {'full_name': p.REPO}}}
+
+    def test_old_event_uses_current_repository_names(self):
+        current = self.fixture()
+        event = copy.deepcopy(current)
+        event['base']['repo']['full_name'] = 'previous-owner/turbo8-catalog'
+        event['head']['repo']['full_name'] = 'previous-owner/turbo8-catalog'
+        self.assertIs(p.current_review_pr(event, current), current)
+
+    def test_other_repository_id_rejected(self):
+        current = self.fixture(); event = copy.deepcopy(current)
+        event['base']['repo']['id'] = 67890
+        with self.assertRaisesRegex(ValueError, 'identity changed'):
+            p.current_review_pr(event, current)
+
+    def test_missing_repository_identity_rejected(self):
+        current = self.fixture(); event = copy.deepcopy(current)
+        del event['base']['repo']['id']
+        with self.assertRaisesRegex(ValueError, 'identity changed'):
+            p.current_review_pr(event, current)
+
+    def test_updated_head_still_rejected(self):
+        current = self.fixture(); event = copy.deepcopy(current)
+        event['head']['sha'] = 'b' * 40
+        with self.assertRaisesRegex(ValueError, 'PR changed'):
+            p.current_review_pr(event, current)
+
+    def test_current_target_must_be_official_main(self):
+        event = self.fixture(); current = copy.deepcopy(event)
+        current['base']['repo']['full_name'] = 'other/turbo8-catalog'
+        with self.assertRaisesRegex(ValueError, 'Unexpected PR target'):
+            p.current_review_pr(event, current)
+        current = copy.deepcopy(event); current['base']['ref'] = 'untrusted'
+        with self.assertRaisesRegex(ValueError, 'Unexpected PR target'):
+            p.current_review_pr(event, current)
+
+
 class BlobBudgetTests(unittest.TestCase):
     def test_wrapped_blob_response_fits(self):
         for size in (0, 1, 2, 3, 2388769, 16 * 1024 * 1024):

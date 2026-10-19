@@ -224,12 +224,25 @@ def tree_files(repository, commit, cart_id, metadata_only=False):
     return files, root_sha
 
 
+def current_review_pr(event_pr, current):
+    # Reruns retain the old webhook names after an owner/repository rename.
+    # Match immutable repository IDs, then use fresh server-owned PR metadata.
+    base = current['base']
+    require(base['repo']['full_name'] == REPO and base['ref'] == 'main', 'Unexpected PR target')
+    repo_id = base['repo'].get('id')
+    require(type(repo_id) is int and repo_id > 0 and
+            event_pr['base']['repo'].get('id') == repo_id and
+            event_pr['base']['ref'] == 'main' and
+            event_pr['number'] == current['number'], 'PR event repository identity changed')
+    require(current['head']['sha'] == event_pr['head']['sha'], 'PR changed; wait for its newer check')
+    return current
+
+
 def check_pr(event_path, output):
     event = json.loads(Path(event_path).read_text())
     pr = event['pull_request']
-    require(pr['base']['repo']['full_name'] == REPO and pr['base']['ref'] == 'main', 'Unexpected PR target')
     current = api(f'/repos/{REPO}/pulls/{pr["number"]}')
-    require(current['head']['sha'] == pr['head']['sha'], 'PR changed; wait for its newer check')
+    pr = current_review_pr(pr, current)
     changed = []
     for page in range(1, 4):
         batch = api(f'/repos/{REPO}/pulls/{pr["number"]}/files?per_page=100&page={page}')
