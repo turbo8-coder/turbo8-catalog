@@ -177,6 +177,13 @@ def api(path, limit=4 * 1024 * 1024):
     return json.loads(raw)
 
 
+def blob_response_limit(size):
+    # GitHub wraps base64 at 60 columns; each newline occupies two JSON bytes.
+    # This transport allowance does not change decoded file/resource budgets.
+    encoded = 4 * ((size + 2) // 3)
+    return encoded + 2 * ((encoded + 59) // 60) + 65536
+
+
 def tree_files(repository, commit, cart_id, metadata_only=False):
     require(re.fullmatch(r'[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+', repository), 'Invalid repository')
     require(re.fullmatch(r'[a-f0-9]{40}', commit), 'Invalid commit')
@@ -209,7 +216,7 @@ def tree_files(repository, commit, cart_id, metadata_only=False):
             size = entry.get('size', MAX_EXPANDED + 1)
             total += size
             require(total <= MAX_EXPANDED and size <= 16 * 1024 * 1024 and len(files) < MAX_FILES, 'File budget exceeded')
-            blob = api(f'/repos/{repository}/git/blobs/{entry["sha"]}', (size * 4 // 3) + 65536)
+            blob = api(f'/repos/{repository}/git/blobs/{entry["sha"]}', blob_response_limit(size))
             require(blob.get('encoding') == 'base64', 'Unexpected blob encoding')
             data = base64.b64decode(blob['content'])
             require(len(data) == size, 'Blob size mismatch')

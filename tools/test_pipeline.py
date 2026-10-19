@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import copy
+import base64
 import importlib.util
 import json
 import struct
@@ -109,6 +110,46 @@ class ValidationTests(unittest.TestCase):
 
     def test_public_api_is_fixed(self):
         with self.assertRaisesRegex(ValueError, 'Unexpected API path'): p.api('https://example.com/token')
+
+
+class BlobBudgetTests(unittest.TestCase):
+    def test_wrapped_blob_response_fits(self):
+        for size in (0, 1, 2, 3, 2388769, 16 * 1024 * 1024):
+            with self.subTest(size=size):
+                encoded = base64.b64encode(b'x' * size).decode('ascii')
+                content = ''.join(encoded[i:i + 60] + '\n' for i in range(0, len(encoded), 60))
+                raw = json.dumps({'encoding': 'base64', 'content': content}).encode()
+                limit = p.blob_response_limit(size)
+                if size == 2388769:
+                    self.assertGreater(len(raw), size * 4 // 3 + 65536)
+                with patch.dict(p.os.environ, GH_TOKEN='test'), patch.object(p.urllib.request, 'build_opener') as opener:
+                    opener.return_value.open.return_value = io.BytesIO(raw)
+                    blob = p.api('/repos/' + p.REPO + '/git/blobs/' + 'a' * 40, limit)
+                self.assertEqual(len(base64.b64decode(blob['content'])), size)
+
+    def test_transport_response_still_bounded(self):
+        limit = p.blob_response_limit(1)
+        with patch.dict(p.os.environ, GH_TOKEN='test'), patch.object(p.urllib.request, 'build_opener') as opener:
+            opener.return_value.open.return_value = io.BytesIO(b' ' * (limit + 1))
+            with self.assertRaisesRegex(ValueError, 'response exceeds limit'):
+                p.api('/repos/' + p.REPO + '/git/blobs/' + 'a' * 40, limit)
+
+    def test_tree_file_budget_and_decoded_size_unchanged(self):
+        for size, data, message in [(16 * 1024 * 1024 + 1, b'', 'File budget exceeded'), (1, b'xx', 'Blob size mismatch')]:
+            with self.subTest(size=size):
+                responses = [
+                    {'tree': [{'path': 'carts', 'type': 'tree', 'sha': 'b' * 40}]},
+                    {'tree': [{'path': CART, 'type': 'tree', 'sha': 'c' * 40}]},
+                    {'tree': [{'path': 'submission.json', 'type': 'blob', 'mode': '100644', 'size': size, 'sha': 'd' * 40}]},
+                    {'encoding': 'base64', 'content': base64.b64encode(data).decode()},
+                ]
+                with patch.object(p, 'api', side_effect=responses) as api:
+                    with self.assertRaisesRegex(ValueError, message):
+                        p.tree_files(p.REPO, 'a' * 40, CART)
+                    if size > 16 * 1024 * 1024:
+                        self.assertEqual(api.call_count, 3)
+                    else:
+                        self.assertEqual(api.call_args.args[1], p.blob_response_limit(size))
 
 
 class PublicationTests(unittest.TestCase):
