@@ -17,6 +17,7 @@ import urllib.request
 import zipfile
 import zlib
 from pathlib import Path
+import catalog_moderation as moderation
 from editor_validation import (CONTRACT, LIMITS, compatibility_warnings, read_json,
                                script_files, validate_resources)
 
@@ -356,8 +357,11 @@ def release_asset(tag, filename, raw, commit):
     require(downloaded == raw, 'Public Release download verification failed')
 
 
-def build(root, output, publish=False):
+def build(root, output, publish=False, unlisted=None):
     require(not output.exists(), 'Output directory must be new')
+    if unlisted is None:
+        unlisted = moderation.ledger(moderation.current_catalog()) if publish else {}
+    moderation.ledger({'unlisted': unlisted})
     shutil.copytree(root / 'docs', output)
     (output / '.nojekyll').touch()
     manifest = json.loads((root / 'docs/catalog-v2.json').read_text())
@@ -378,12 +382,14 @@ def build(root, output, publish=False):
     if publish:
         add_publication_times(entries.values())
     # Also improve discovery in older clients that render the server order.
-    manifest['cartridges'] = sorted(entries.values(), key=lambda x: (-publication_time(x.get('updated_at')), x['title'].casefold(), x['id']))
+    manifest['cartridges'] = sorted(moderation.visible(entries.values(), unlisted), key=lambda x: (-publication_time(x.get('updated_at')), x['title'].casefold(), x['id']))
+    manifest['unlisted'] = unlisted
     manifest['source_commit'] = commit
+    require(len(json_bytes(manifest)) <= moderation.MAX_MANIFEST, 'Catalog including visibility history exceeds 1 MiB')
     (output / 'catalog-v2.json').write_bytes(json_bytes(manifest))
     legacy = dict(manifest, cartridges=[x for x in manifest['cartridges'] if x['bytes'] <= 8 * 1024 * 1024])
     (output / 'catalog.json').write_bytes(json_bytes(legacy))
-    print(f'Built {len(entries)} catalog entries; preserved curated catalog and covers.')
+    print(f'Built {len(manifest["cartridges"])} visible entries; retained {len(unlisted)} unlisting records and all release assets.')
 
 
 def publication_time(value):
@@ -411,8 +417,9 @@ def add_publication_times(entries):
 
 def verify_pages(expected):
     wanted = json.loads(expected.read_text())
+    digest = hashlib.sha256(json_bytes(wanted)).hexdigest()
     for attempt in range(12):
-        url = f'https://turbo8-coder.github.io/turbo8-catalog/catalog-v2.json?revision={wanted["source_commit"]}&attempt={attempt}'
+        url = f'https://turbo8-coder.github.io/turbo8-catalog/catalog-v2.json?revision={wanted["source_commit"]}&manifest={digest}&attempt={attempt}'
         try:
             with urllib.request.urlopen(url, timeout=30) as response:
                 actual = json.loads(response.read(1024 * 1024))
@@ -437,11 +444,28 @@ def main():
     generate.add_argument('--publish', action='store_true')
     verify = commands.add_parser('verify-pages')
     verify.add_argument('--expected', type=Path, required=True)
+    unlist = commands.add_parser('unlist')
+    unlist.add_argument('--root', type=Path, default=Path('.'))
+    unlist.add_argument('--output', type=Path, required=True)
+    unlist.add_argument('--id', required=True)
+    unlist.add_argument('--expected-sha', required=True)
+    unlist.add_argument('--request-id', required=True)
+    unlist.add_argument('--preview', action='store_true')
+    unlist.add_argument('--restore', action='store_true')
     args = parser.parse_args()
     if args.command == 'check-pr':
         check_pr(args.event, args.output)
     elif args.command == 'build':
         build(args.root.resolve(), args.output.resolve(), args.publish)
+    elif args.command == 'unlist':
+        actor, actor_id = moderation.require_admin(api, REPO)
+        current = moderation.current_catalog()
+        records = (moderation.plan_restore(current, args.id, args.expected_sha) if args.restore else
+                   moderation.plan_unlist(current, args.id, args.expected_sha, args.request_id, actor, actor_id))
+        if args.preview:
+            print('Authorized preview succeeded. No catalog, Release or local files were changed.')
+        else:
+            build(args.root.resolve(), args.output.resolve(), True, records)
     else:
         verify_pages(args.expected)
 

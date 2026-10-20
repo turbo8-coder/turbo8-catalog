@@ -1,0 +1,98 @@
+name: Moderate catalog
+run-name: Catalog ${{ inputs.operation }} ${{ inputs.cartridge_id }} [${{ inputs.request_id }}]
+on:
+  workflow_dispatch:
+    inputs:
+      operation:
+        description: Unlist a work, or restore a previously unlisted work
+        required: true
+        default: unlist
+        type: choice
+        options: [unlist, restore]
+      cartridge_id:
+        description: Published cartridge ID
+        required: true
+        type: string
+      expected_sha:
+        description: SHA-256 shown when the administrator confirmed
+        required: true
+        type: string
+      request_id:
+        description: Unique 32-character lowercase hexadecimal request ID
+        required: true
+        type: string
+      preview:
+        description: Validate administrator and target without changing anything
+        default: true
+        type: boolean
+permissions:
+  contents: read
+# Share the publication lock so a later build cannot discard an unlisting.
+concurrency:
+  group: catalog-publication
+  cancel-in-progress: false
+jobs:
+  build:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: main
+          persist-credentials: false
+      - name: Test trusted tooling
+        run: python3 tools/test_pipeline.py
+      - name: Recheck administrator and apply visibility change
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CART_ID: ${{ inputs.cartridge_id }}
+          CART_SHA: ${{ inputs.expected_sha }}
+          REQUEST_ID: ${{ inputs.request_id }}
+          PREVIEW: ${{ inputs.preview }}
+          OPERATION: ${{ inputs.operation }}
+        run: |
+          options=()
+          if [ "$PREVIEW" = "true" ]; then options+=(--preview); fi
+          if [ "$OPERATION" = "restore" ]; then options+=(--restore); elif [ "$OPERATION" != "unlist" ]; then exit 1; fi
+          python3 tools/catalog_pipeline.py unlist --output "$RUNNER_TEMP/site" --id "$CART_ID" --expected-sha "$CART_SHA" --request-id "$REQUEST_ID" "${options[@]}"
+      - uses: actions/upload-pages-artifact@56afc609e74202658d3ffba0e8f6dda462b719fa
+        if: ${{ !inputs.preview }}
+        with:
+          path: ${{ runner.temp }}/site
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: ${{ !inputs.preview }}
+        with:
+          name: expected-catalog
+          path: ${{ runner.temp }}/site/catalog-v2.json
+  deploy:
+    if: ${{ !inputs.preview }}
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/deploy-pages@d6db90164ac5ed86f2b6aed7e0febac5b3c0c03e
+        id: deployment
+  verify:
+    if: ${{ !inputs.preview }}
+    needs: deploy
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: main
+          persist-credentials: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: expected-catalog
+          path: expected
+      - run: python3 tools/catalog_pipeline.py verify-pages --expected expected/catalog-v2.json

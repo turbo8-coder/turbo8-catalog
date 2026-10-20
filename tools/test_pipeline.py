@@ -343,6 +343,85 @@ class BlobBudgetTests(unittest.TestCase):
                         self.assertEqual(api.call_args.args[1], p.blob_response_limit(size))
 
 
+class ModerationTests(unittest.TestCase):
+    def manifest(self):
+        return {'schema': 1, 'cartridges': [
+            {'id': 'curated-one', 'title': 'Curated', 'sha256': 'a' * 64, 'bytes': 50},
+            {'id': CART, 'title': 'Community', 'sha256': 'b' * 64, 'bytes': 50}]}
+
+    def unlisted(self):
+        return p.moderation.plan_unlist(self.manifest(), 'curated-one', 'a' * 64, 'c' * 32, 'admin-user', 123)
+
+    def test_server_requires_admin_actor_on_trusted_main(self):
+        env = {'GITHUB_ACTIONS': 'true', 'GITHUB_REPOSITORY': p.REPO,
+               'GITHUB_REF': 'refs/heads/main', 'GITHUB_ACTOR': 'admin-user',
+               'GITHUB_ACTOR_ID': '123'}
+        with patch.dict(p.os.environ, env, clear=True):
+            for right in ('read', 'write', 'maintain'):
+                with self.subTest(right=right), self.assertRaisesRegex(ValueError, 'administrators'):
+                    p.moderation.require_admin(lambda _: {'permission': right, 'user': {'id': 123}}, p.REPO)
+            self.assertEqual(p.moderation.require_admin(
+                lambda _: {'permission': 'admin', 'user': {'id': 123}}, p.REPO), ('admin-user', 123))
+            with self.assertRaisesRegex(ValueError, 'administrators'):
+                p.moderation.require_admin(lambda _: {'permission': 'admin', 'user': {'id': 456}}, p.REPO)
+            with patch.dict(p.os.environ, {'GITHUB_REF': 'refs/heads/attacker'}):
+                with self.assertRaisesRegex(ValueError, 'trusted main'):
+                    p.moderation.require_admin(lambda _: {}, p.REPO)
+
+    def test_unlisting_preserves_history_and_hides_future_versions(self):
+        manifest = self.manifest()
+        before = copy.deepcopy(manifest)
+        records = self.unlisted()
+        future = copy.deepcopy(manifest['cartridges'])
+        future[0]['sha256'] = 'd' * 64
+        visible = p.moderation.visible(future, records)
+        self.assertEqual([x['id'] for x in visible], [CART])
+        self.assertEqual(manifest, before)
+        self.assertEqual(records['curated-one']['actor_id'], 123)
+        retry = {'cartridges': visible, 'unlisted': records}
+        self.assertEqual(p.moderation.plan_unlist(retry, 'curated-one', 'a' * 64, 'e' * 32, 'admin-user', 123), records)
+
+    def test_stale_or_unsafe_unlisting_fails(self):
+        for cart_id, sha in [('curated-one', 'f' * 64), ('../outside', 'a' * 64), ('missing', 'a' * 64)]:
+            with self.subTest(cart_id=cart_id), self.assertRaises(ValueError):
+                p.moderation.plan_unlist(self.manifest(), cart_id, sha, 'c' * 32, 'admin-user', 123)
+        with self.assertRaisesRegex(ValueError, 'ledger'):
+            p.moderation.ledger({'unlisted': []})
+        with self.assertRaisesRegex(ValueError, 'record'):
+            p.moderation.ledger({'unlisted': {'curated-one': {}}})
+
+    def test_regular_publish_retains_unlisting_in_both_catalogs(self):
+        with p.tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / 'repo'; (root / 'docs').mkdir(parents=True); (root / 'carts').mkdir()
+            (root / 'docs/catalog-v2.json').write_bytes(p.json_bytes(self.manifest()))
+            published = dict(self.manifest(), unlisted=self.unlisted())
+            with patch.object(p.moderation, 'current_catalog', return_value=published), \
+                    patch.object(p, 'add_publication_times'), \
+                    patch.object(p.subprocess, 'check_output', return_value='a' * 40):
+                p.build(root, Path(tmp) / 'output', publish=True)
+            for name in ('catalog-v2.json', 'catalog.json'):
+                result = json.loads((Path(tmp) / 'output' / name).read_text())
+                self.assertEqual([entry['id'] for entry in result['cartridges']], [CART])
+                self.assertEqual(result['unlisted'], published['unlisted'])
+
+    def test_missing_public_ledger_never_silently_relists(self):
+        with p.tempfile.TemporaryDirectory() as tmp, \
+                patch.object(p.moderation, 'current_catalog', side_effect=OSError('offline')):
+            output = Path(tmp) / 'output'
+            with self.assertRaises(OSError):
+                p.build(Path(tmp), output, publish=True)
+            self.assertFalse(output.exists())
+
+    def test_explicit_restore_preserves_other_visibility_records(self):
+        manifest = self.manifest()
+        manifest['unlisted'] = self.unlisted()
+        records = p.moderation.plan_restore(manifest, 'curated-one', 'a' * 64)
+        self.assertEqual(records, {})
+        self.assertIn('curated-one', manifest['unlisted'])
+        with self.assertRaisesRegex(ValueError, 'changed'):
+            p.moderation.plan_restore(manifest, 'curated-one', 'f' * 64)
+
+
 class PublicationTests(unittest.TestCase):
     def release_stub(self, existing_bytes=None, draft=True):
         state = {'id': 123, 'tag_name': 'test-tag', 'draft': draft, 'assets': [] if existing_bytes is None else [{'name': 'fixture.zip'}]}

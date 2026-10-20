@@ -84,3 +84,22 @@ artifact. A passing review check alone does not publish or merge a cartridge.
 Draft recovery pages the authenticated release list, including older drafts.
 New drafts are taken directly from the creation response and published by
 numeric Release ID. Drafts are never queried through the public tag endpoint.
+
+## Administrator unlisting
+
+Online's administrator menu dispatches **Moderate catalog** on trusted `main`.
+The server rechecks the actor's numeric identity and repository `admin`
+permission; write/maintain permission alone is insufficient. The confirmed ZIP
+hash must still match, preventing stale confirmations from hiding a new version.
+
+The published manifest retains an `unlisted` visibility ledger. Both normal
+publication and moderation share a concurrency lock and preserve the latest
+ledger. Failed/malformed reads block publication. Hidden works stay hidden
+across later versions and are excluded from both catalog formats. Release
+assets, sources, covers, PR history and existing downloads remain unchanged.
+
+The workflow defaults to preview, which does not deploy or change Releases.
+For administrator recovery, select `operation=restore`, use the hidden work's
+ID and SHA-256 from the ledger plus a fresh 32-character hexadecimal request ID.
+Preview first, then disable preview to deploy the current approved version.
+Never deploy the raw curated `docs/` input over the generated published catalog.
