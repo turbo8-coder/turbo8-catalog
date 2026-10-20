@@ -312,21 +312,30 @@ def gh(*args):
 
 def release_asset(tag, filename, raw, commit):
     """Existing version assets are immutable; retries verify rather than overwrite."""
-    listed = json.loads(gh('api', f'repos/{REPO}/releases?per_page=100'))
-    # Fetch a named release directly so older versions remain retryable beyond page one.
-    existing = next((r for r in listed if r['tag_name'] == tag), None)
-    if existing is None:
-        probe = subprocess.run(['gh', 'api', f'repos/{REPO}/releases/tags/{tag}'], text=True, capture_output=True)
-        if probe.returncode == 0:
-            existing = json.loads(probe.stdout)
-        else:
-            require('404' in probe.stderr, 'Cannot determine existing Release state')
+    existing = None
+    # The tag endpoint excludes drafts. Page the authenticated release listing
+    # so retries also recover drafts older than the first 100 releases.
+    for page in range(1, 1001):
+        listed = json.loads(gh('api', f'repos/{REPO}/releases?per_page=100&page={page}'))
+        require(isinstance(listed, list), 'Cannot determine existing Release state')
+        existing = next((r for r in listed if r['tag_name'] == tag), None)
+        if existing is not None or len(listed) < 100:
+            break
+    else:
+        raise ValueError('Release listing exceeds safe paging limit; refusing to create a duplicate')
     with tempfile.TemporaryDirectory() as tmp:
         path = Path(tmp) / filename
         path.write_bytes(raw)
         if existing is None:
-            gh('release', 'create', tag, '--repo', REPO, '--target', commit, '--title', tag, '--notes', 'Reviewed Turbo8 community cartridge.', '--latest=false', '--draft')
-            existing = json.loads(gh('api', f'repos/{REPO}/releases/tags/{tag}'))
+            # Creation returns the draft and its numeric ID directly. Never
+            # immediately look it up through the public tag endpoint.
+            existing = json.loads(gh('api', '--method', 'POST', f'repos/{REPO}/releases',
+                                     '-f', f'tag_name={tag}', '-f', f'target_commitish={commit}',
+                                     '-f', f'name={tag}', '-f', 'body=Reviewed Turbo8 community cartridge.',
+                                     '-F', 'draft=true', '-f', 'make_latest=false'))
+        require(isinstance(existing, dict) and type(existing.get('id')) is int and
+                existing['id'] > 0 and existing.get('tag_name') == tag and
+                isinstance(existing.get('assets'), list), 'Invalid Release response')
         asset = next((a for a in existing['assets'] if a['name'] == filename), None)
         if asset:
             downloaded_dir = Path(tmp) / 'downloaded'
@@ -338,7 +347,8 @@ def release_asset(tag, filename, raw, commit):
             require(existing['draft'], 'Published Release is missing its asset; manual repair required')
             gh('release', 'upload', tag, str(path), '--repo', REPO)
         if existing['draft']:
-            gh('release', 'edit', tag, '--repo', REPO, '--draft=false', '--latest=false')
+            gh('api', '--method', 'PATCH', f'repos/{REPO}/releases/{existing["id"]}',
+               '-F', 'draft=false', '-f', 'make_latest=false')
     # Verify public delivery before exposing a catalog entry.
     public = f'https://github.com/{REPO}/releases/download/{tag}/{filename}'
     with urllib.request.urlopen(public, timeout=60) as response:

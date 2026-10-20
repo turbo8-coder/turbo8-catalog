@@ -80,3 +80,7 @@ again. Versioned Release assets are immutable: retries compare bytes rather
 than overwrite them. The public ZIP download must match before its catalog
 entry is exposed, and the deployed Pages catalog must match the expected
 artifact. A passing review check alone does not publish or merge a cartridge.
+
+Draft recovery pages the authenticated release list, including older drafts.
+New drafts are taken directly from the creation response and published by
+numeric Release ID. Drafts are never queried through the public tag endpoint.

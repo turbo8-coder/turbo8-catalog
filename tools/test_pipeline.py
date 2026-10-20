@@ -345,10 +345,14 @@ class BlobBudgetTests(unittest.TestCase):
 
 class PublicationTests(unittest.TestCase):
     def release_stub(self, existing_bytes=None, draft=True):
-        state = {'tag_name': 'test-tag', 'draft': draft, 'assets': [] if existing_bytes is None else [{'name': 'fixture.zip'}]}
+        state = {'id': 123, 'tag_name': 'test-tag', 'draft': draft, 'assets': [] if existing_bytes is None else [{'name': 'fixture.zip'}]}
         calls = []
         def fake_gh(*args):
             calls.append(args)
+            if args[:3] == ('api', '--method', 'PATCH'):
+                self.assertEqual(args[3], f'repos/{p.REPO}/releases/123')
+                state['draft'] = False
+                return json.dumps(state)
             if args[0] == 'api': return json.dumps([state])
             if args[:2] == ('release', 'download'):
                 directory = Path(args[args.index('--dir') + 1]); (directory / 'fixture.zip').write_bytes(existing_bytes)
@@ -363,12 +367,51 @@ class PublicationTests(unittest.TestCase):
             p.release_asset('test-tag', 'fixture.zip', b'zip', 'a' * 40)
         self.assertFalse(state['draft'])
         self.assertEqual(sum(c[:2] == ('release', 'upload') for c in calls), 1)
+        self.assertFalse(any('POST' in c or any('/releases/tags/' in x for x in c) for c in calls))
+
+    def test_first_draft_uses_creation_response_and_numeric_id(self):
+        state, calls, base = self.release_stub()
+        def fake(*args):
+            if args[0] == 'api' and args[1].endswith('page=1'):
+                calls.append(args)
+                return '[]'
+            if args[:3] == ('api', '--method', 'POST'):
+                calls.append(args)
+                self.assertIn('draft=true', args)
+                return json.dumps(state)
+            self.assertFalse(any('/releases/tags/' in value for value in args))
+            return base(*args)
+        with patch.object(p, 'gh', fake), patch.object(p.urllib.request, 'urlopen', return_value=io.BytesIO(b'zip')):
+            p.release_asset('test-tag', 'fixture.zip', b'zip', 'a' * 40)
+        self.assertFalse(state['draft'])
+        self.assertEqual(sum('POST' in c for c in calls), 1)
+
+    def test_draft_beyond_first_page_is_resumed(self):
+        state, calls, base = self.release_stub()
+        def fake(*args):
+            if args[0] == 'api' and args[1].endswith('page=1'):
+                calls.append(args)
+                return json.dumps([{'tag_name': f'other-{i}'} for i in range(100)])
+            return base(*args)
+        with patch.object(p, 'gh', fake), patch.object(p.urllib.request, 'urlopen', return_value=io.BytesIO(b'zip')):
+            p.release_asset('test-tag', 'fixture.zip', b'zip', 'a' * 40)
+        self.assertFalse(state['draft'])
+        self.assertTrue(any(c[1].endswith('page=2') for c in calls if c[0] == 'api'))
+        self.assertFalse(any('POST' in c for c in calls))
 
     def test_retry_preserves_existing_asset(self):
         state, calls, fake = self.release_stub(b'zip', draft=False)
         with patch.object(p, 'gh', fake), patch.object(p.urllib.request, 'urlopen', return_value=io.BytesIO(b'zip')):
             p.release_asset('test-tag', 'fixture.zip', b'zip', 'a' * 40)
-        self.assertFalse(any(c[:2] in [('release', 'upload'), ('release', 'edit')] for c in calls))
+        self.assertFalse(any(c[:2] == ('release', 'upload') or 'PATCH' in c for c in calls))
+
+    def test_uploaded_draft_is_verified_then_published_without_reupload(self):
+        state, calls, fake = self.release_stub(b'zip', draft=True)
+        with patch.object(p, 'gh', fake), patch.object(p.urllib.request, 'urlopen', return_value=io.BytesIO(b'zip')):
+            p.release_asset('test-tag', 'fixture.zip', b'zip', 'a' * 40)
+        self.assertFalse(state['draft'])
+        self.assertFalse(any(c[:2] == ('release', 'upload') for c in calls))
+        self.assertTrue(any('PATCH' in c for c in calls))
 
     def test_version_collision_fails_without_overwrite(self):
         state, calls, fake = self.release_stub(b'old', draft=False)
