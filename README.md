@@ -70,6 +70,11 @@ that client limitation.
 
 ## Publication checks
 
+Entries carry `updated_at` from the current ZIP's public Release asset creation
+time, not the directory build time. Catalog order is newest first with title/ID
+tie-breaks, including for older clients. Updated clients also offer alphabetical
+sorting. Optional ranking metadata can be extended without changing ZIPs.
+
 After merge, publication runs the tooling tests and validates cartridge data
 again. Versioned Release assets are immutable: retries compare bytes rather
 than overwrite them. The public ZIP download must match before its catalog

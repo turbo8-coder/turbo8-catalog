@@ -365,12 +365,38 @@ def build(root, output, publish=False):
         entries[directory.name] = {'id': directory.name, 'title': meta['title'], 'version': meta['version'], 'tag': tag, 'asset': asset, 'bytes': len(raw), 'sha256': hashlib.sha256(raw).hexdigest(), 'resolution': resolution, 'author_id': meta['author_id'], 'summary': meta['summary'], 'submission_revision': revision}
         (output / 'covers').mkdir(exist_ok=True)
         (output / 'covers' / (directory.name + '.png')).write_bytes(cover)
-    manifest['cartridges'] = sorted(entries.values(), key=lambda x: x['title'].casefold())
+    if publish:
+        add_publication_times(entries.values())
+    # Also improve discovery in older clients that render the server order.
+    manifest['cartridges'] = sorted(entries.values(), key=lambda x: (-publication_time(x.get('updated_at')), x['title'].casefold(), x['id']))
     manifest['source_commit'] = commit
     (output / 'catalog-v2.json').write_bytes(json_bytes(manifest))
     legacy = dict(manifest, cartridges=[x for x in manifest['cartridges'] if x['bytes'] <= 8 * 1024 * 1024])
     (output / 'catalog.json').write_bytes(json_bytes(legacy))
     print(f'Built {len(entries)} catalog entries; preserved curated catalog and covers.')
+
+
+def publication_time(value):
+    from datetime import datetime, timezone
+    try:
+        return int(datetime.strptime(value, '%Y-%m-%dT%H:%M:%SZ').replace(tzinfo=timezone.utc).timestamp())
+    except (ValueError, TypeError):
+        return 0
+
+
+def add_publication_times(entries):
+    """Use immutable public asset creation dates, never the current build time."""
+    releases = {}
+    for entry in entries:
+        tag = entry['tag']
+        if tag not in releases:
+            releases[tag] = json.loads(gh('api', f'repos/{REPO}/releases/tags/{tag}'))
+        release = releases[tag]
+        asset = next((a for a in release['assets'] if a['name'] == entry['asset']), None)
+        require(asset is not None, 'Published catalog asset is missing: ' + entry['asset'])
+        date = asset.get('created_at') or release.get('published_at')
+        require(publication_time(date) > 0, 'Published asset has no valid timestamp')
+        entry['updated_at'] = date
 
 
 def verify_pages(expected):

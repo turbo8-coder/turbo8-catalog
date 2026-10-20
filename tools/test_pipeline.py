@@ -31,6 +31,24 @@ def fixture():
 
 
 class ValidationTests(unittest.TestCase):
+    def test_publication_dates_are_stable_asset_dates(self):
+        entries = [{'id': 'one', 'tag': 'shared', 'asset': 'one.zip'},
+                   {'id': 'two', 'tag': 'shared', 'asset': 'two.zip'}]
+        release = {'published_at': '2026-10-01T00:00:00Z', 'assets': [
+            {'name': 'one.zip', 'created_at': '2026-10-02T00:00:00Z'},
+            {'name': 'two.zip', 'created_at': '2026-10-03T00:00:00Z'}]}
+        with patch.object(p, 'gh', return_value=json.dumps(release)) as gh:
+            p.add_publication_times(entries)
+            self.assertEqual(gh.call_count, 1)
+        self.assertEqual(entries[0]['updated_at'], '2026-10-02T00:00:00Z')
+        self.assertGreater(p.publication_time(entries[1]['updated_at']),
+                           p.publication_time(entries[0]['updated_at']))
+        with patch.object(p, 'gh', return_value=json.dumps({'assets': []})):
+            with self.assertRaisesRegex(ValueError, 'asset is missing'):
+                p.add_publication_times(entries)
+        for value in (None, '', 'invalid', '2026-02-30T00:00:00Z'):
+            self.assertEqual(p.publication_time(value), 0)
+
     def test_editor_compatibility_cases(self):
         for name, files, expected in cases(fixture):
             with self.subTest(name=name):
