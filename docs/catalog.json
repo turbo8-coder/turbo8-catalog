@@ -167,15 +167,15 @@
       "id": "the-long-night-1187b9e64c",
       "title": "The Long Night",
       "source_file": "The Long Night.zip",
-      "bytes": 744436,
-      "sha256": "fa58f24cf77872dc1beca38c6eb52d20a7ee490865c4ef2a8b8e886433017cbb",
+      "bytes": 768389,
+      "sha256": "59ad5223316a709e517d421d536f6322647b8e18854eb335912b50495d42cd0f",
       "resolution": {
         "width": 384,
         "height": 216
       },
-      "version": "1.0.1",
-      "tag": "carts-20261020151805",
-      "asset": "the-long-night-1187b9e64c-v1.0.1.zip"
+      "version": "1.0.2",
+      "tag": "carts-20261020154419",
+      "asset": "the-long-night-1187b9e64c-v1.0.2.zip"
     },
     {
       "id": "tom-and-jerry-pantry-panic-030b350805",
@@ -390,5 +390,5 @@
       "asset": "cart-499c41a489-v1.0.0.zip"
     }
   ],
-  "updated_at": "2026-10-20T15:18:20.699296+00:00"
+  "updated_at": "2026-10-20T15:44:31.905552+00:00"
 }
