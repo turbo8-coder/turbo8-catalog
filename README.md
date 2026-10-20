@@ -85,6 +85,15 @@ Draft recovery pages the authenticated release list, including older drafts.
 New drafts are taken directly from the creation response and published by
 numeric Release ID. Drafts are never queried through the public tag endpoint.
 
+Every build also publishes all curated and reviewed covers into one immutable
+`covers/<sha256>.png` namespace with explicit path, digest, bytes and dimensions.
+The `online-covers-v1` Release serves the identical PNGs through GitHub download
+mirrors; Pages is the final fallback. Compression is lossless. Existing
+`covers/<cartridge-id>.png` URLs remain unchanged for older clients. New PR
+merges automatically use this path, and rebuilds migrate all existing covers.
+Cover-only changes invalidate client caches even without a cartridge version
+bump. Publication verifies Release asset digests and each public Pages PNG.
+
 ## Administrator unlisting
 
 Online's administrator menu dispatches **Moderate catalog** on trusted `main`.

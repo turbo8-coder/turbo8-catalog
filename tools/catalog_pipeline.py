@@ -15,6 +15,7 @@ import time
 import urllib.error
 import urllib.request
 import zipfile
+import cover_assets
 import zlib
 from pathlib import Path
 import catalog_moderation as moderation
@@ -57,21 +58,7 @@ def safe_path(name):
 
 
 def png_size(raw):
-    require(len(raw) >= 33 and raw[:8] == b'\x89PNG\r\n\x1a\n' and raw[12:16] == b'IHDR', 'Invalid PNG header')
-    offset = 8
-    ended = False
-    while offset + 12 <= len(raw):
-        size = struct.unpack('>I', raw[offset:offset + 4])[0]
-        require(offset + size + 12 <= len(raw), 'Truncated PNG chunk')
-        chunk = raw[offset + 4:offset + 8 + size]
-        crc = struct.unpack('>I', raw[offset + 8 + size:offset + 12 + size])[0]
-        require(zlib.crc32(chunk) & 0xffffffff == crc, 'PNG checksum mismatch')
-        offset += size + 12
-        if chunk[:4] == b'IEND':
-            ended = True
-            break
-    require(ended and offset == len(raw), 'Invalid PNG ending')
-    return struct.unpack('>II', raw[16:24])
+    return cover_assets.png_size(raw)
 
 
 def validate(files, cart_id, actor=None, previous=None, check_js=True):
@@ -379,7 +366,10 @@ def build(root, output, publish=False, unlisted=None):
         entries[directory.name] = {'id': directory.name, 'title': meta['title'], 'version': meta['version'], 'tag': tag, 'asset': asset, 'bytes': len(raw), 'sha256': hashlib.sha256(raw).hexdigest(), 'resolution': resolution, 'author_id': meta['author_id'], 'summary': meta['summary'], 'submission_revision': revision}
         (output / 'covers').mkdir(exist_ok=True)
         (output / 'covers' / (directory.name + '.png')).write_bytes(cover)
+    # All curated and reviewed entries share one immutable thumbnail namespace.
+    covers = cover_assets.generate(list(entries.values()), output)
     if publish:
+        cover_assets.publish(covers, commit, gh)
         add_publication_times(entries.values())
     # Also improve discovery in older clients that render the server order.
     manifest['cartridges'] = sorted(moderation.visible(entries.values(), unlisted), key=lambda x: (-publication_time(x.get('updated_at')), x['title'].casefold(), x['id']))
@@ -424,6 +414,7 @@ def verify_pages(expected):
             with urllib.request.urlopen(url, timeout=30) as response:
                 actual = json.loads(response.read(1024 * 1024))
             if actual == wanted:
+                cover_assets.verify(wanted['cartridges'], 'https://turbo8-coder.github.io/turbo8-catalog/')
                 print('Public catalog matches the deployed artifact.')
                 return
         except (OSError, ValueError):

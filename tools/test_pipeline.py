@@ -394,8 +394,12 @@ class ModerationTests(unittest.TestCase):
         with p.tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / 'repo'; (root / 'docs').mkdir(parents=True); (root / 'carts').mkdir()
             (root / 'docs/catalog-v2.json').write_bytes(p.json_bytes(self.manifest()))
+            (root / 'docs/covers').mkdir()
+            for entry in self.manifest()['cartridges']:
+                (root / 'docs/covers' / (entry['id'] + '.png')).write_bytes(png(256, 144))
             published = dict(self.manifest(), unlisted=self.unlisted())
             with patch.object(p.moderation, 'current_catalog', return_value=published), \
+                    patch.object(p.cover_assets, 'publish'), \
                     patch.object(p, 'add_publication_times'), \
                     patch.object(p.subprocess, 'check_output', return_value='a' * 40):
                 p.build(root, Path(tmp) / 'output', publish=True)
@@ -420,6 +424,111 @@ class ModerationTests(unittest.TestCase):
         self.assertIn('curated-one', manifest['unlisted'])
         with self.assertRaisesRegex(ValueError, 'changed'):
             p.moderation.plan_restore(manifest, 'curated-one', 'f' * 64)
+
+
+class CoverTests(unittest.TestCase):
+    def pixels(self, raw):
+        position = 8
+        data = b''
+        while position < len(raw):
+            size = struct.unpack('>I', raw[position:position + 4])[0]
+            if raw[position + 4:position + 8] == b'IDAT':
+                data += raw[position + 8:position + 8 + size]
+            position += size + 12
+        return zlib.decompress(data)
+
+    def test_lossless_thumbnail_recompression(self):
+        raw = png(256, 144)
+        # A valid but poorly compressed PNG exercises actual size reduction.
+        data = b'IDAT' + zlib.compress(self.pixels(raw), 0)
+        chunk = struct.pack('>I', len(data) - 4) + data + struct.pack('>I', zlib.crc32(data) & 0xffffffff)
+        original = raw[:33] + chunk + raw[-12:]
+        result = p.cover_assets.optimize(original)
+        self.assertEqual(self.pixels(original), self.pixels(result))
+        self.assertEqual(p.png_size(result), (256, 144))
+        self.assertLess(len(result), len(original) // 10)
+        self.assertEqual(p.cover_assets.optimize(result), result)
+
+    def test_all_legacy_and_reviewed_covers_use_one_namespace(self):
+        with p.tempfile.TemporaryDirectory() as tmp:
+            output = Path(tmp); (output / 'covers').mkdir()
+            entries = [{'id': 'curated-one', 'version': '1.0.0'},
+                       {'id': CART, 'version': '1.0.0', 'submission_revision': 'a' * 40}]
+            raw = png(256, 144)
+            for entry in entries:
+                (output / 'covers' / (entry['id'] + '.png')).write_bytes(raw)
+            mirrors = p.cover_assets.generate(entries, output)
+            self.assertEqual(len(mirrors), 1)
+            self.assertEqual(entries[0]['cover'], entries[1]['cover'])
+            for entry in entries:
+                cover = entry['cover']
+                result = (output / cover['path']).read_bytes()
+                self.assertEqual(hashlib.sha256(result).hexdigest(), cover['sha256'])
+                self.assertEqual(len(result), cover['bytes'])
+                self.assertEqual((output / 'covers' / (entry['id'] + '.png')).read_bytes(), raw)
+
+    def test_cover_only_edit_changes_hash_without_version_change(self):
+        with p.tempfile.TemporaryDirectory() as tmp:
+            output = Path(tmp); (output / 'covers').mkdir()
+            entry = {'id': 'same-version', 'version': '1.0.0'}
+            raw = png(256, 144)
+            path = output / 'covers/same-version.png'; path.write_bytes(raw)
+            p.cover_assets.generate([entry], output)
+            old = entry['cover']['sha256']
+            # Change one decoded color byte and regenerate CRC/compressed data.
+            pixels = bytearray(self.pixels(raw)); pixels[1] = 255
+            data = b'IDAT' + zlib.compress(pixels, 9)
+            path.write_bytes(raw[:33] + struct.pack('>I', len(data) - 4) + data +
+                             struct.pack('>I', zlib.crc32(data) & 0xffffffff) + raw[-12:])
+            p.cover_assets.generate([entry], output)
+            self.assertNotEqual(entry['cover']['sha256'], old)
+            self.assertEqual(entry['version'], '1.0.0')
+
+    def test_bad_cover_or_missing_migration_input_blocks_publication(self):
+        with p.tempfile.TemporaryDirectory() as tmp:
+            with self.assertRaisesRegex(ValueError, 'Missing cover'):
+                p.cover_assets.generate([{'id': 'missing'}], Path(tmp))
+            for raw in (b'not png', png(128, 128), png(256, 144)[:-1]):
+                with self.subTest(size=len(raw)), self.assertRaises(ValueError):
+                    p.cover_assets.optimize(raw)
+
+    def test_cover_mirror_append_only_and_retry(self):
+        raw = png(256, 144); name = hashlib.sha256(raw).hexdigest() + '.png'
+        state = {'id': 789, 'tag_name': p.cover_assets.TAG, 'draft': True, 'assets': []}
+        calls = []
+        def fake(*args):
+            calls.append(args)
+            if args[:3] == ('api', '--method', 'POST'):
+                return json.dumps(state)
+            if args[:3] == ('api', '--method', 'PATCH'):
+                state['draft'] = False
+                return json.dumps(state)
+            if args[:2] == ('release', 'upload'):
+                self.assertNotIn('--clobber', args)
+                uploaded = Path(args[3]).read_bytes()
+                state['assets'].append({'name': name, 'size': len(uploaded),
+                                        'digest': 'sha256:' + hashlib.sha256(uploaded).hexdigest()})
+                return ''
+            if args[1].endswith('/releases/789'): return json.dumps(state)
+            return json.dumps([state] if state['assets'] else [])
+        p.cover_assets.publish({name: raw}, 'a' * 40, fake)
+        self.assertFalse(state['draft'])
+        calls.clear()
+        p.cover_assets.publish({name: raw}, 'a' * 40, fake)
+        self.assertFalse(any(c[:2] == ('release', 'upload') or 'POST' in c for c in calls))
+        state['assets'][0]['digest'] = 'sha256:' + '0' * 64
+        with self.assertRaisesRegex(ValueError, 'SHA-256'):
+            p.cover_assets.publish({name: raw}, 'a' * 40, fake)
+
+    def test_public_pngs_verified_not_only_manifest(self):
+        raw = png(256, 144); digest = hashlib.sha256(raw).hexdigest()
+        entries = [{'id': 'one', 'cover': {'path': 'covers/' + digest + '.png',
+                                         'bytes': len(raw), 'sha256': digest}}]
+        with patch.object(p.cover_assets.urllib.request, 'urlopen', return_value=io.BytesIO(raw)):
+            p.cover_assets.verify(entries, 'https://example.test/')
+        with patch.object(p.cover_assets.urllib.request, 'urlopen', return_value=io.BytesIO(b'wrong')):
+            with self.assertRaisesRegex(ValueError, 'Public cover'):
+                p.cover_assets.verify(entries, 'https://example.test/')
 
 
 class PublicationTests(unittest.TestCase):
