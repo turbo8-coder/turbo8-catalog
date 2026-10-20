@@ -29,6 +29,61 @@ def fixture():
 
 
 class ValidationTests(unittest.TestCase):
+    def test_virtual_buttons_roundtrip(self):
+        # Absence remains supported; an empty list means joystick-only.
+        p.validate(fixture(), CART)
+        for buttons in ([], ['A', 'B'], ['A', 'B', 'X', 'Y'],
+                        ['A', 'B', 'SELECT', 'START', 'X', 'Y', 'LB', 'RB', 'LT', 'RT']):
+            for controls in (None, True, False):
+                with self.subTest(buttons=buttons, controls=controls):
+                    files = fixture()
+                    files['cartridge/virtualButtons.json'] = p.json_bytes(buttons)
+                    if controls is not None:
+                        files['cartridge/virtualControls.json'] = p.json_bytes(controls)
+                    raw = p.validate(files, CART)[1]
+                    with p.zipfile.ZipFile(io.BytesIO(raw)) as archive:
+                        self.assertEqual(json.loads(archive.read('virtualButtons.json')), buttons)
+                        if controls is not None:
+                            self.assertIs(json.loads(archive.read('virtualControls.json')), controls)
+
+    def test_reject_invalid_virtual_buttons(self):
+        for buttons, message in [
+            (None, 'array'), (True, 'array'), (1, 'array'), ('A', 'array'), ({}, 'array'),
+            (['A'] * 11, 'up to 10'), (['A', 'A'], 'duplicate'),
+            (['LEFT'], 'unknown'), (['a'], 'unknown'), (['UNKNOWN'], 'unknown'),
+            ([1], 'unknown'), ([False], 'unknown'), ([None], 'unknown'),
+            ([[]], 'unknown'), ([{}], 'unknown'),
+        ]:
+            with self.subTest(buttons=buttons):
+                files = fixture()
+                files['cartridge/virtualButtons.json'] = p.json_bytes(buttons)
+                with self.assertRaisesRegex(ValueError, message):
+                    p.validate(files, CART)
+
+    def test_virtual_controls_requires_boolean(self):
+        for controls in (True, False, None, 0, 1, 'false', [], {}):
+            with self.subTest(controls=controls):
+                files = fixture()
+                files['cartridge/virtualControls.json'] = p.json_bytes(controls)
+                if type(controls) is bool:
+                    p.validate(files, CART)
+                else:
+                    with self.assertRaisesRegex(ValueError, 'must contain a boolean'):
+                        p.validate(files, CART)
+
+    def test_malformed_virtual_input_json(self):
+        for name in ('virtualButtons', 'virtualControls'):
+            files = fixture()
+            files['cartridge/' + name + '.json'] = b'{'
+            with self.subTest(name=name), self.assertRaises(ValueError):
+                p.validate(files, CART)
+
+    def test_unexpected_file_error_names_file(self):
+        files = fixture()
+        files['cartridge/secret.txt'] = b'not a cartridge resource'
+        with self.assertRaisesRegex(ValueError, r'Unexpected cartridge file: secret\.txt'):
+            p.validate(files, CART)
+
     def test_retired_controls_are_ignored(self):
         files = fixture()
         meta = json.loads(files['submission.json'])

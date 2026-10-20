@@ -25,6 +25,8 @@ MAX_FILES = 128
 ID = re.compile(r'u[1-9][0-9]{0,19}-[a-f0-9]{32}')
 VERSION = re.compile(r'(0|[1-9][0-9]{0,5})\.(0|[1-9][0-9]{0,5})\.(0|[1-9][0-9]{0,5})')
 PATH = re.compile(r'[A-Za-z0-9_-]+(?:[./][A-Za-z0-9_-]+)*')
+# Match Editor/input_config.gd; directional input belongs to the joystick.
+VIRTUAL_ACTIONS = frozenset(('A', 'B', 'SELECT', 'START', 'X', 'Y', 'LB', 'RB', 'LT', 'RT'))
 
 
 def require(condition, message):
@@ -106,7 +108,7 @@ def validate(files, cart_id, actor=None, previous=None, check_js=True):
     require(isinstance(scripts, list) and 1 <= len(scripts) <= 32, 'Invalid script list')
     require(all(isinstance(s, str) and re.fullmatch(r'[A-Za-z_][A-Za-z0-9_-]{0,63}\.js', s) for s in scripts), 'Invalid script filename')
     require(len(set(scripts)) == len(scripts), 'Duplicate scripts')
-    allowed_files = set(scripts) | {'index.json', 'cover.png', 'sprites.png', 'maps.json', 'sfx.json', 'music.json', 'palette.json', 'spriteMeta.json', 'flags.json', 'sprites.json', 'pico8.json', 'postEffects.json', 'virtualControls.json'}
+    allowed_files = set(scripts) | {'index.json', 'cover.png', 'sprites.png', 'maps.json', 'sfx.json', 'music.json', 'palette.json', 'spriteMeta.json', 'flags.json', 'sprites.json', 'pico8.json', 'postEffects.json', 'virtualControls.json', 'virtualButtons.json'}
     images = index.get('images', [])
     require(isinstance(images, list) and len(images) <= 64, 'Invalid image list')
     image_bytes = image_pixels = 0
@@ -125,7 +127,18 @@ def validate(files, cart_id, actor=None, previous=None, check_js=True):
         image_pixels += iw * ih
         require(image_bytes <= 16 * 1024 * 1024 and image_pixels <= 8388608, 'Total embedded image budget exceeded')
         allowed_files.add(name)
-    require(set(cartridge) <= allowed_files, 'Unexpected cartridge file')
+    unexpected = sorted(set(cartridge) - allowed_files)
+    require(not unexpected, 'Unexpected cartridge file: ' + ', '.join(unexpected))
+    if 'virtualControls.json' in cartridge:
+        require(type(json.loads(cartridge['virtualControls.json'])) is bool,
+                'virtualControls.json must contain a boolean')
+    if 'virtualButtons.json' in cartridge:
+        buttons = json.loads(cartridge['virtualButtons.json'])
+        require(isinstance(buttons, list) and len(buttons) <= len(VIRTUAL_ACTIONS),
+                'virtualButtons.json must contain an array of up to 10 action names')
+        require(all(isinstance(button, str) and button in VIRTUAL_ACTIONS for button in buttons),
+                'virtualButtons.json contains an unknown action button')
+        require(len(set(buttons)) == len(buttons), 'virtualButtons.json contains duplicate action buttons')
     require(all(s in cartridge for s in scripts), 'Missing script')
     palette = json.loads(cartridge.get('palette.json', b'null'))
     require(isinstance(palette, list) and 1 <= len(palette) <= 256 and all(isinstance(c, str) and re.fullmatch(r'#[a-fA-F0-9]{6}', c) for c in palette), 'Invalid or missing palette')
