@@ -16,6 +16,8 @@ jobs:
         with:
           ref: main
           persist-credentials: false
+      - name: Test trusted validator
+        run: python3 tools/test_pipeline.py
       - name: Validate submission and create review ZIP
         env:
           GH_TOKEN: ${{ github.token }}

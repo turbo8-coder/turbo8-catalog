@@ -17,16 +17,17 @@ import urllib.request
 import zipfile
 import zlib
 from pathlib import Path
+from editor_validation import (CONTRACT, LIMITS, compatibility_warnings, read_json,
+                               script_files, validate_resources)
 
 REPO = 'turbo8-coder/turbo8-catalog'
-MAX_EXPANDED = 64 * 1024 * 1024
-MAX_ZIP = 32 * 1024 * 1024
-MAX_FILES = 128
+MAX_EXPANDED = LIMITS['expandedBytes']
+MAX_ZIP = LIMITS['zipBytes']
+MAX_FILES = LIMITS['files']
+MAX_FILE = LIMITS['fileBytes']
 ID = re.compile(r'u[1-9][0-9]{0,19}-[a-f0-9]{32}')
 VERSION = re.compile(r'(0|[1-9][0-9]{0,5})\.(0|[1-9][0-9]{0,5})\.(0|[1-9][0-9]{0,5})')
 PATH = re.compile(r'[A-Za-z0-9_-]+(?:[./][A-Za-z0-9_-]+)*')
-# Match Editor/input_config.gd; directional input belongs to the joystick.
-VIRTUAL_ACTIONS = frozenset(('A', 'B', 'SELECT', 'START', 'X', 'Y', 'LB', 'RB', 'LT', 'RT'))
 
 
 def require(condition, message):
@@ -44,7 +45,14 @@ def version(value):
 
 
 def safe_path(name):
-    return isinstance(name, str) and len(name) <= 160 and PATH.fullmatch(name) and '..' not in name and not name.startswith('.')
+    # ZIP resources are read as data, not extracted/executed. Editor script
+    # labels may contain spaces or Unicode; those are not path traversal.
+    if not isinstance(name, str) or len(name) > LIMITS['pathLength']:
+        return False
+    if any(ord(c) < 32 or ord(c) == 127 or c in '\\:*?"<>|' for c in name):
+        return False
+    return all(part.strip() and part not in ('.', '..') and not part.startswith('.')
+               for part in name.split('/'))
 
 
 def png_size(raw):
@@ -69,96 +77,93 @@ def validate(files, cart_id, actor=None, previous=None, check_js=True):
     """Never import, source, or execute any submitted file."""
     require(ID.fullmatch(cart_id), 'Invalid cartridge ID')
     require(0 < len(files) <= MAX_FILES and sum(map(len, files.values())) <= MAX_EXPANDED, 'Too many files or expanded bytes')
+    require(all(len(raw) <= MAX_FILE for raw in files.values()), 'File exceeds editor submission limit')
     require(all(safe_path(p) for p in files), 'Unsafe path')
     require(len({p.casefold() for p in files}) == len(files), 'Case-insensitive path collision')
-    require('submission.json' in files and len(files['submission.json']) <= 16384, 'Missing or oversized submission.json')
-    meta = json.loads(files['submission.json'])
+    require('submission.json' in files, 'Missing submission.json')
+    meta = read_json(files['submission.json'])
     require(isinstance(meta, dict) and meta.get('schema') == 1, 'Unsupported submission schema')
     for retired in ('remix_of', 'code_license', 'assets_license', 'controls'):
         meta.pop(retired, None)  # Ignore retired fields in existing submissions.
-    allowed = {'schema', 'id', 'author_id', 'title', 'summary', 'version', 'changes'}
-    require(set(meta) <= allowed, 'Unknown submission field')
+    # Extra metadata may come from a newer client; security-sensitive fields are
+    # still checked below. Do not let an optional new field block an old format.
     require(meta.get('id') == cart_id, 'ID does not match directory')
     author = meta.get('author_id')
     require(type(author) is int and author > 0 and cart_id.startswith(f'u{author}-'), 'Invalid author ID')
     if actor is not None:
         require(author == actor, 'Only the verified GitHub author may submit this cartridge')
     for key, limit in [('title', 120), ('summary', 2000), ('changes', 2000)]:
-        value = meta.get(key)
-        require(isinstance(value, str) and 0 < len(value.strip()) <= limit and '\x00' not in value, f'Missing or invalid {key}')
+        value = meta.get(key, '')
+        require(isinstance(value, str) and len(value) <= limit and '\x00' not in value and
+                (key != 'title' or value.strip()), f'Missing or invalid {key}')
+        meta[key] = value
     version(meta.get('version'))
     if previous:
         require(previous['author_id'] == author and previous['id'] == cart_id, 'Author and ID are immutable')
         require(version(meta['version']) > version(previous['version']), 'An update must increase the version')
     cartridge = {p[len('cartridge/'):]: v for p, v in files.items() if p.startswith('cartridge/')}
     require(len(cartridge) + 1 == len(files), 'Only submission.json and cartridge/ are allowed')
-    require('index.json' in cartridge and len(cartridge['index.json']) <= 65536, 'Missing or oversized cartridge index')
-    index = json.loads(cartridge['index.json'])
+    require('index.json' in cartridge, 'Missing cartridge index')
+    index = read_json(cartridge['index.json'])
     require(isinstance(index, dict), 'Invalid cartridge index')
     require(index.get('name') == meta['title'] and index.get('cartridgeVersion') == meta['version'], 'Cartridge title/version must match submission')
-    resolution = index.get('resolution', {'width': 256, 'height': 144})
+    display = CONTRACT['display']
+    default = next(p for p in display['presets'] if p['id'] == display['default'])
+    resolution = index.get('resolution', {'width': default['width'], 'height': default['height']})
     require(isinstance(resolution, dict), 'Invalid canvas')
     w, h = resolution.get('width'), resolution.get('height')
-    require(all(type(n) in (int, float) and 64 <= n <= 512 and int(n) == n for n in [w, h]), 'Invalid canvas dimensions')
+    require(all(type(n) in (int, float) and display['minDimension'] <= n <= display['maxDimension'] and int(n) == n
+                for n in [w, h]), 'Invalid canvas dimensions')
     w, h = int(w), int(h)
-    require(w * h <= 196608 and max(w/h, h/w) <= 3, 'Canvas exceeds supported limits')
+    require(w * h <= display['maxPixels'] and max(w/h, h/w) <= display['maxAspect'], 'Canvas exceeds supported limits')
     cover = cartridge.get('cover.png', b'')
-    require(len(cover) <= 128 * 1024 and png_size(cover) == (256, 144), 'Cover must be 256 x 144 PNG, at most 128 KiB')
-    scripts = index.get('scripts')
-    require(isinstance(scripts, list) and 1 <= len(scripts) <= 32, 'Invalid script list')
-    require(all(isinstance(s, str) and re.fullmatch(r'[A-Za-z_][A-Za-z0-9_-]{0,63}\.js', s) for s in scripts), 'Invalid script filename')
-    require(len(set(scripts)) == len(scripts), 'Duplicate scripts')
-    allowed_files = set(scripts) | {'index.json', 'cover.png', 'sprites.png', 'maps.json', 'sfx.json', 'music.json', 'palette.json', 'spriteMeta.json', 'flags.json', 'sprites.json', 'pico8.json', 'postEffects.json', 'virtualControls.json', 'virtualButtons.json'}
+    cover_rules = CONTRACT['cover']
+    require(len(cover) <= cover_rules['bytes'] and png_size(cover) == (cover_rules['width'], cover_rules['height']),
+            'Cover does not match editor output dimensions or byte limit')
+    scripts = script_files(index)
+    allowed_files = set(scripts) | {'index.json', 'cover.png', 'sprites.png'}
+    allowed_files.update(name + '.json' for name in CONTRACT['resource_json'])
+    image_rules = CONTRACT['images']
     images = index.get('images', [])
-    require(isinstance(images, list) and len(images) <= 64, 'Invalid image list')
+    require(isinstance(images, list) and len(images) <= image_rules['maxImages'], 'Invalid image list')
     image_bytes = image_pixels = 0
     image_ids = set()
     for entry in images:
         require(isinstance(entry, dict) and isinstance(entry.get('id'), str) and re.fullmatch(r'[A-Za-z][A-Za-z0-9_-]{0,63}', entry['id']), 'Invalid image entry')
         require(entry['id'] not in image_ids, 'Duplicate image ID')
         image_ids.add(entry['id'])
+        require(isinstance(entry.get('name', entry['id']), str) and len(entry.get('name', entry['id'])) <= 128,
+                'Invalid image name')
         name = 'images/' + entry['id'] + '.png'
         require(entry.get('file') == name and name in cartridge, 'Missing embedded image')
-        require(len(cartridge[name]) <= 8 * 1024 * 1024, 'Embedded image too large')
+        require(len(cartridge[name]) <= image_rules['maxBytesPerImage'], 'Embedded image too large')
         iw, ih = png_size(cartridge[name])
-        require(1 <= iw <= 4096 and 1 <= ih <= 4096 and iw * ih <= 4194304, 'Embedded image dimensions too large')
+        require(1 <= iw <= image_rules['maxSide'] and 1 <= ih <= image_rules['maxSide'] and
+                iw * ih <= image_rules['maxPixelsPerImage'], 'Embedded image dimensions too large')
         require(entry.get('width') == iw and entry.get('height') == ih, 'Embedded image dimensions do not match')
         image_bytes += len(cartridge[name])
         image_pixels += iw * ih
-        require(image_bytes <= 16 * 1024 * 1024 and image_pixels <= 8388608, 'Total embedded image budget exceeded')
+        require(image_bytes <= image_rules['maxTotalBytes'] and image_pixels <= image_rules['maxTotalPixels'],
+                'Total embedded image budget exceeded')
         allowed_files.add(name)
-    unexpected = sorted(set(cartridge) - allowed_files)
+    # Optional JSON extensions are data, bounded by the same submission budgets.
+    # Preserve their bytes for newer clients; older editors already ignore them.
+    unexpected = sorted(name for name in set(cartridge) - allowed_files if not name.endswith('.json'))
     require(not unexpected, 'Unexpected cartridge file: ' + ', '.join(unexpected))
-    if 'virtualControls.json' in cartridge:
-        require(type(json.loads(cartridge['virtualControls.json'])) is bool,
-                'virtualControls.json must contain a boolean')
-    if 'virtualButtons.json' in cartridge:
-        buttons = json.loads(cartridge['virtualButtons.json'])
-        require(isinstance(buttons, list) and len(buttons) <= len(VIRTUAL_ACTIONS),
-                'virtualButtons.json must contain an array of up to 10 action names')
-        require(all(isinstance(button, str) and button in VIRTUAL_ACTIONS for button in buttons),
-                'virtualButtons.json contains an unknown action button')
-        require(len(set(buttons)) == len(buttons), 'virtualButtons.json contains duplicate action buttons')
+    # The legacy ZIP reader resolves suffixes as well as exact names. An extra
+    # nested index/maps/etc. must not shadow the root resource we validated.
+    reserved = {name + '.json' for name in CONTRACT['resource_json']} | {'index.json'}
+    require(not any('/' in name and name.rsplit('/', 1)[-1] in reserved for name in cartridge),
+            'Nested JSON resource shadows a reserved editor filename')
     require(all(s in cartridge for s in scripts), 'Missing script')
-    palette = json.loads(cartridge.get('palette.json', b'null'))
-    require(isinstance(palette, list) and 1 <= len(palette) <= 256 and all(isinstance(c, str) and re.fullmatch(r'#[a-fA-F0-9]{6}', c) for c in palette), 'Invalid or missing palette')
-    if 'sprites.json' in cartridge:
-        sprites = json.loads(cartridge['sprites.json'])
-        require(isinstance(sprites, list) and len(sprites) <= 4096, 'Invalid sprites')
-        require(all(isinstance(sprite, list) and len(sprite) <= 64 and all(c is None or isinstance(c, str) and re.fullmatch(r'#[a-fA-F0-9]{6}', c) for c in sprite) for sprite in sprites), 'Invalid sprite pixels')
-    else:
+    validate_resources(cartridge)
+    if 'sprites.json' not in cartridge:
         require('sprites.png' in cartridge, 'Missing sprites')
         sw, sh = png_size(cartridge['sprites.png'])
-        require(1 <= sw <= 4096 and 1 <= sh <= 4096 and sw * sh <= 4096 * 64, 'Sprite sheet too large')
-    for name, limit in [('maps', 64), ('sfx', 256), ('music', 256)]:
-        if name + '.json' in cartridge:
-            resources = json.loads(cartridge[name + '.json'])
-            require(isinstance(resources, list) and len(resources) <= limit and all(isinstance(x, dict) for x in resources), 'Invalid ' + name)
+        require(1 <= sw <= image_rules['maxSide'] and 1 <= sh <= image_rules['maxSide'] and
+                sw * sh <= image_rules['maxPixelsPerImage'], 'Sprite sheet exceeds decoded image budget')
     for name, raw in cartridge.items():
-        if name.endswith('.json'):
-            json.loads(raw)
         if name.endswith('.js'):
-            require(len(raw) <= 2 * 1024 * 1024, 'Script too large')
             raw.decode('utf-8')
             if check_js:
                 result = subprocess.run(['node', '--check', '--input-type=commonjs'], input=raw, capture_output=True, timeout=20)
@@ -211,9 +216,12 @@ def tree_files(repository, commit, cart_id, metadata_only=False):
     root_sha = sha
     files = {}
     pending = [('', sha)]
+    directories = 0
     total = 0
     while pending:
         prefix, sha = pending.pop()
+        directories += 1
+        require(directories <= MAX_FILES * LIMITS['pathLength'] // 2, 'Too many cartridge directories')
         tree = api(f'/repos/{repository}/git/trees/{sha}')
         require(not tree.get('truncated') and len(tree['tree']) <= MAX_FILES, 'Oversized tree')
         for entry in tree['tree']:
@@ -222,13 +230,13 @@ def tree_files(repository, commit, cart_id, metadata_only=False):
             name = prefix + entry['path']
             require(safe_path(name), 'Unsafe path')
             if entry['type'] == 'tree':
-                require(name == 'cartridge' or name == 'cartridge/images', 'Unexpected subdirectory')
+                require(name == 'cartridge' or name.startswith('cartridge/'), 'Unexpected subdirectory')
                 pending.append((name + '/', entry['sha']))
                 continue
             require(entry['type'] == 'blob' and entry['mode'] == '100644', 'Symlinks, executables and submodules are not allowed')
             size = entry.get('size', MAX_EXPANDED + 1)
             total += size
-            require(total <= MAX_EXPANDED and size <= 16 * 1024 * 1024 and len(files) < MAX_FILES, 'File budget exceeded')
+            require(total <= MAX_EXPANDED and size <= MAX_FILE and len(files) < MAX_FILES, 'File budget exceeded')
             blob = api(f'/repos/{repository}/git/blobs/{entry["sha"]}', blob_response_limit(size))
             require(blob.get('encoding') == 'base64', 'Unexpected blob encoding')
             data = base64.b64decode(blob['content'])
@@ -278,9 +286,12 @@ def check_pr(event_path, output):
     previous = json.loads(prior['submission.json']) if prior else None
     require(api(f'/repos/{REPO}/pulls/{pr["number"]}')['head']['sha'] == pr['head']['sha'], 'PR changed during validation')
     meta, raw, _, _ = validate(files, cart_id, int(pr['user']['id']), previous)
+    warnings = compatibility_warnings(files)
     output.mkdir(parents=True, exist_ok=True)
     (output / f'{cart_id}.zip').write_bytes(raw)
-    (output / 'review.json').write_bytes(json_bytes({'id': cart_id, 'version': meta['version'], 'author_id': meta['author_id'], 'head_sha': pr['head']['sha'], 'submission_revision': revision, 'bytes': len(raw), 'sha256': hashlib.sha256(raw).hexdigest()}))
+    (output / 'review.json').write_bytes(json_bytes({'id': cart_id, 'version': meta['version'], 'author_id': meta['author_id'], 'head_sha': pr['head']['sha'], 'submission_revision': revision, 'bytes': len(raw), 'sha256': hashlib.sha256(raw).hexdigest(), 'compatibility_warnings': warnings}))
+    for warning in warnings:
+        print('Compatibility warning: ' + warning)
     print('Validated one cartridge; candidate ZIP is available as a workflow artifact.')
 
 
@@ -289,7 +300,7 @@ def local_files(directory):
     for p in directory.rglob('*'):
         require(not p.is_symlink(), 'Symlinks are not allowed')
         if p.is_file():
-            require(p.stat().st_size <= 16 * 1024 * 1024, 'File too large')
+            require(p.stat().st_size <= MAX_FILE, 'File too large')
             files[p.relative_to(directory).as_posix()] = p.read_bytes()
             require(len(files) <= MAX_FILES and sum(map(len, files.values())) <= MAX_EXPANDED, 'Cartridge exceeds file budget')
     return files

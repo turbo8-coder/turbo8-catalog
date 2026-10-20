@@ -8,7 +8,9 @@ import unittest
 from unittest.mock import patch
 import io
 import zlib
+import hashlib
 from pathlib import Path
+from compatibility_cases import cases
 
 spec = importlib.util.spec_from_file_location('pipeline', Path(__file__).with_name('catalog_pipeline.py'))
 p = importlib.util.module_from_spec(spec)
@@ -29,6 +31,82 @@ def fixture():
 
 
 class ValidationTests(unittest.TestCase):
+    def test_editor_compatibility_cases(self):
+        for name, files, expected in cases(fixture):
+            with self.subTest(name=name):
+                if expected:
+                    p.validate(files, CART)
+                else:
+                    with self.assertRaises(ValueError):
+                        p.validate(files, CART)
+
+    def test_optional_submission_fields_and_extensions(self):
+        files = fixture()
+        meta = json.loads(files['submission.json'])
+        meta.pop('summary'); meta['changes'] = ''; meta['optionalExtension'] = {'enabled': True}
+        files['submission.json'] = p.json_bytes(meta)
+        validated = p.validate(files, CART)[0]
+        self.assertEqual(validated['summary'], '')
+        self.assertEqual(validated['changes'], '')
+        self.assertEqual(validated['optionalExtension'], {'enabled': True})
+
+    def test_unicode_metadata_uses_editor_character_limits(self):
+        files = fixture()
+        meta = json.loads(files['submission.json'])
+        meta['title'] = '🌍' * 120; meta['summary'] = '🌍' * 2000; meta['changes'] = '🌍' * 2000
+        files['submission.json'] = p.json_bytes(meta)
+        index = json.loads(files['cartridge/index.json']); index['name'] = meta['title']
+        files['cartridge/index.json'] = p.json_bytes(index)
+        self.assertGreater(len(files['submission.json']), 16384)
+        p.validate(files, CART)
+
+    def test_json_extensions_preserved_and_reported(self):
+        files = fixture(); raw = b'{"future":true}'
+        files['cartridge/extensions/animation.json'] = raw
+        packed = p.validate(files, CART)[1]
+        with p.zipfile.ZipFile(io.BytesIO(packed)) as archive:
+            self.assertEqual(archive.read('extensions/animation.json'), raw)
+        self.assertIn('extensions/animation.json', p.compatibility_warnings(files)[0])
+
+    def test_nested_extension_cannot_shadow_loader_resources(self):
+        for name in ('index', 'maps', 'postEffects', 'virtualButtons'):
+            files = fixture(); files['cartridge/extensions/' + name + '.json'] = b'{}'
+            with self.subTest(name=name), self.assertRaisesRegex(ValueError, 'shadows'):
+                p.validate(files, CART)
+
+    def test_unicode_paths_do_not_allow_traversal_or_host_paths(self):
+        for path in ('cartridge/美术资源.js', 'cartridge/farm and story.js',
+                     'cartridge/AUREOLE / FLIGHT.js'):
+            self.assertTrue(p.safe_path(path))
+        for path in ('/absolute', 'cartridge/../escape', 'cartridge//index.json',
+                     'C:/host/path', 'cartridge\\index.json', 'cartridge/\x00bad',
+                     'cartridge/.github/workflows/config.json', 'cartridge/\nbad'):
+            with self.subTest(path=path):
+                self.assertFalse(p.safe_path(path))
+
+    def test_new_format_is_explicitly_reported_not_silently_supported(self):
+        files = fixture(); index = json.loads(files['cartridge/index.json'])
+        index['version'] = '999.0'; files['cartridge/index.json'] = p.json_bytes(index)
+        p.validate(files, CART)
+        self.assertIn('playtest compatibility', p.compatibility_warnings(files)[0])
+
+    def test_extension_does_not_weaken_file_budget_or_script_allowlist(self):
+        for name, raw in [('future.json', b'x' * (p.MAX_FILE + 1)),
+                          ('future.json', b'{'), ('future.js', b'throw 1;'),
+                          ('future.exe', b'MZ')]:
+            files = fixture(); files['cartridge/' + name] = raw
+            with self.subTest(name=name), self.assertRaises(ValueError):
+                p.validate(files, CART)
+
+    def test_editor_contract_provenance_when_sources_available(self):
+        root = Path(__file__).resolve().parents[2]
+        if not (root / 'Editor/document.gd').exists():
+            self.skipTest('Cloud checkout uses the generated editor contract')
+        for name, digest in p.CONTRACT['source_sha256'].items():
+            with self.subTest(source=name):
+                self.assertEqual(hashlib.sha256((root / name).read_bytes()).hexdigest(), digest,
+                                 'Run sync_contract.py and real-editor parity tests before deploying changed editor rules')
+
     def test_virtual_buttons_roundtrip(self):
         # Absence remains supported; an empty list means joystick-only.
         p.validate(fixture(), CART)
