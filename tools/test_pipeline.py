@@ -31,6 +31,21 @@ def fixture():
 
 
 class ValidationTests(unittest.TestCase):
+    def test_raised_image_budget(self):
+        files = fixture()
+        index = json.loads(files['cartridge/index.json'])
+        raw = png(4096, 2048)
+        index['images'] = []
+        for name in ('first', 'second', 'third'):
+            index['images'].append({'id': name, 'name': name, 'file': 'images/' + name + '.png', 'width': 4096, 'height': 2048})
+            files['cartridge/images/' + name + '.png'] = raw
+            files['cartridge/index.json'] = p.json_bytes(index)
+            if name != 'third':
+                p.validate(files, CART)
+            else:
+                with self.assertRaisesRegex(ValueError, 'budget'):
+                    p.validate(files, CART)
+
     def test_publication_dates_are_stable_asset_dates(self):
         entries = [{'id': 'one', 'tag': 'shared', 'asset': 'one.zip'},
                    {'id': 'two', 'tag': 'shared', 'asset': 'two.zip'}]
