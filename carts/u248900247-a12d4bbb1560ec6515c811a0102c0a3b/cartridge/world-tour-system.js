@@ -1,5 +1,24 @@
 // Six short stages. One deterministic traffic lane keeps timing readable.
-const PX=190, GROUND=222, GRAVITY=.56;
+let PX=190;
+const GROUND=222, GRAVITY=.56;
+let moveAxis=0,walkDistance=0,playerFacing=1,walkSpeed=0;
+function updatePlayerMovement(){
+ const axis=(controlHeld(1)?1:0)-(controlHeld(0)?1:0);
+ const oldX=PX;
+ const canMove=!stageDone&&siuAge===0;
+ const target=canMove?axis*(jumpAge>=0?2.2:2.2):0;
+ // A short weight transfer avoids an instant full-speed start or sliding stop.
+ const acceleration=axis?.8:1.1;
+ walkSpeed+=Math.max(-acceleration,Math.min(acceleration,target-walkSpeed));
+ if(Math.abs(walkSpeed)<.01)walkSpeed=0;
+ if(canMove){
+  if(axis)playerFacing=axis;
+  const recovery=jumpAge<0&&landAge>1?.5:1;
+  PX=Math.max(36,Math.min(screen_size().width-36,PX+walkSpeed*recovery));
+ }else walkSpeed=0;
+ moveAxis=Math.sign(PX-oldX);
+ if(jumpAge<0&&moveAxis&&landAge<=1)walkDistance+=Math.abs(PX-oldX);
+}
 const VEHICLES=[
  {name:'SUPERCAR',art:'car0',w:136,h:46,speed:6.0,shape:'car'},
  {name:'SEDAN',art:'car1',w:128,h:48,speed:6.15,shape:'car'},
@@ -70,10 +89,12 @@ function updateScenery(){
 }
 function beginRun(infinite){
  runAssisted=autoEnabled;endless=infinite;stage=0;score=0;combo=0;maxCombo=0;total=0;perfects=0;lives=3;maxLives=3;owned={};
- if(infinite){owned.double=true;owned.flip=true;owned.siu=true;}
- stageStartScore=0;stageStartTotal=0;stageStartPerfects=0;stageStartMaxCombo=0;attempt=1;prepareStage();mode='intro';console.log('NEW RUN endless='+endless);
+ if(infinite){owned.double=true;owned.flip=true;}
+ // SIU is always earned through its upgrade, including Endless Lab.
+ stageStartScore=0;stageStartTotal=0;stageStartPerfects=0;stageStartMaxCombo=0;attempt=1;prepareStage();mode='intro';console.log('NEW RUN endless='+endless+' siuUnlocked='+(owned.siu===true));
 }
 function prepareStage(){
+ PX=190;moveAxis=0;walkDistance=0;playerFacing=1;walkSpeed=0;
  car=null;sent=0;stageClears=0;stagePerfects=0;stageGoal=STAGES[stage].order.length;spawnWait=50;runTick=0;
  lift=0;vy=0;jumpAge=-1;flipAge=-1;flipped=false;airStep=false;landAge=0;siuAge=0;hurt=0;jumpBuffer=0;stageDone=false;partCount=0;impactAge=0;
  landGood=false;landPerfect=false;shield=owned.shield?1:0;toast='';toastTime=0;gradeTime=0;mode='intro';
@@ -158,8 +179,8 @@ function launch(second){
  console.log((second?'AIR STEP':'JUMP')+' tick='+runTick+' x='+(car?car.x.toFixed(1):'-'));
 }
 function actorName(){
- if(siuAge>0)return siuAge>5?'siu2':'actor14';
- if(jumpAge<0){if(landAge>4)return 'actor13';if(landAge>0)return 'actor14';if(car&&!car.passed&&car.x>PX&&car.x<330)return car.x<285?'actor2':'actor1';return 'actor0';}
+ if(owned.siu===true&&siuAge>0)return siuAge>5?'siu2':'actor14';
+ if(jumpAge<0){if(moveAxis&&landAge<=1)return 'actor0';if(landAge>3)return 'actor13';if(landAge>0)return 'actor1';if(car&&!car.passed&&car.x>PX&&car.x<PX+140)return car.x<PX+95?'actor2':'actor1';return 'actor0';}
  if(owned.siu&&((landGood&&landPerfect)||(car&&car.perfect&&!car.hit))&&vy<0&&lift<70&&(flipAge<0||flipAge>=18))return lift>43?'siu0':lift>17?'siu1':'siu2';
  if(flipAge>=0&&flipAge<18)return FLIP_ART[Math.min(5,Math.floor(flipAge/3))];
  if(jumpAge<2)return 'actor3';if(jumpAge<6)return 'actor4';if(vy>1.1)return 'actor5';if(vy>-1.3)return 'actor6';return lift>45?'actor16':'actor7';
@@ -196,6 +217,7 @@ function gameUpdate(){
  if(mode==='over'){if(controlPressed(4))retryStage();else if(controlPressed(5))mode='title';return;}
  if(mode==='win'){if(controlPressed(4))beginRun(true);else if(controlPressed(5))mode='title';return;}
  runTick++;if(hurt>0)hurt--;
+ updatePlayerMovement();
  if(controlPressed(5))jumpBuffer=owned.heart?7:4;else if(jumpBuffer>0)jumpBuffer--;
  if(jumpBuffer&&jumpAge<0&&!stageDone)launch(false);
  else if(controlPressed(5)&&jumpAge>3&&owned.double&&!airStep&&!stageDone)launch(true);
@@ -216,10 +238,11 @@ function gameUpdate(){
    }
   }
   if(lift<=0){
-   lift=0;jumpAge=-1;flipAge=-1;landAge=9;shake=10;impactAge=14;impactPower=1;burst(PX,GROUND,10,7);sfx(4);
+   lift=0;jumpAge=-1;flipAge=-1;landAge=6;shake=10;impactAge=14;impactPower=1;burst(PX,GROUND,10,7);sfx(4);
    if(landGood){cheer=32;sfx(9);if(owned.hype){score+=25;burst(PX,GROUND-8,10,10);}
-    if(owned.siu&&landPerfect){siuAge=32;shake=12;cheer=65;impactAge=21;impactPower=1.6;score+=200;pop('SIUUU!  +200',10);burst(PX,GROUND,24,10,1.5);sfx(8);console.log('SIU LANDING score='+score);}
+    if(owned.siu===true&&landPerfect){siuAge=32;shake=12;cheer=65;impactAge=21;impactPower=1.6;score+=200;pop('SIUUU!  +200',10);burst(PX,GROUND,24,10,1.5);sfx(8);console.log('SIU LANDING score='+score);}
    }
+   console.log('LAND siuUnlocked='+(owned.siu===true)+' celebration='+siuAge);
   }
  }else{if(landAge>0)landAge--;if(siuAge>0)siuAge--;}
  if(car){
