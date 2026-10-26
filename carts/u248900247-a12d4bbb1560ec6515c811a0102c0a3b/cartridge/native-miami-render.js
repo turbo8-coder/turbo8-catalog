@@ -10,7 +10,7 @@ const FONT='fusion-pixel-12', SMALL='fusion-pixel-10', HEAD='press start 2p', TE
 const PALM_ART=['palmFine0','palmFine1','palmFine2','palmFine3','palmFine4','palmFine5','palmFine6'];
 const FAN_ART=[["fanFine0_0","fanFine0_1","fanFine0_2","fanFine0_3"],["fanFine1_0","fanFine1_1","fanFine1_2","fanFine1_3"],["fanFine2_0","fanFine2_1","fanFine2_2","fanFine2_3"],["fanFine3_0","fanFine3_1","fanFine3_2","fanFine3_3"],["fanFine4_0","fanFine4_1","fanFine4_2","fanFine4_3"],["fanFine5_0","fanFine5_1","fanFine5_2","fanFine5_3"]];
 const BALL_ART=['ball0','ball1','ball2','ball3'];
-function art(name,x,y){if(FINE_PLAYER[name]){let p=FINE_PLAYER[name];image_region('fine-player',p.x,p.y,p.w,p.h,Math.round(x)-16,Math.round(y)-22,96,96);return;}let a=ART[name];if(a.map)use_map(a.map);map(a.x,a.y,Math.round(x),Math.round(y),a.w,a.h);if(a.map)use_map(0);}
+function art(name,x,y){if(FINE_PLAYER[name]){let p=FINE_PLAYER[name];image_region('fine-player',p.x,p.y,p.w,p.h,Math.round(x)-16,Math.round(y)-22,96,96,playerFacing<0);return;}let a=ART[name];if(a.map)use_map(a.map);map(a.x,a.y,Math.round(x),Math.round(y),a.w,a.h);if(a.map)use_map(0);}
 function txt(s,x,y,c=7,f=FONT){
  x=Math.round(x);y=Math.round(y);
  if(f===HEAD&&c!==0)bprint(s,x+1,y+1,1,f);
@@ -136,7 +136,10 @@ function vehicleDraw(c){
 function playerDraw(){
  ellipsefill(PX,GROUND+2,Math.max(4,12-Math.floor(lift*.06)),2,0);
  if(shield){ellipse(PX,GROUND-lift-30,28,34,12);if(tick%8<4)pset(PX-23,GROUND-lift-42,7);}
- if(hurt===0||tick%4<2)art(actorName(),PX-32,GROUND-lift-60);
+ if(hurt===0||tick%4<2){
+  if(jumpAge<0&&moveAxis&&landAge<=1&&siuAge===0)drawPlayerWalk();
+  else art(actorName(),PX-32,GROUND-lift-60);
+ }
  if(airStep&&jumpAge>=0&&jumpAge<8){line(PX-13,GROUND-lift+4,PX+13,GROUND-lift+4,11);line(PX-8,GROUND-lift+7,PX+8,GROUND-lift+7,7);}
 
 }
@@ -157,18 +160,18 @@ function hud(){
  keyHint('B',owned.double?'JUMP / AIR STEP':'JUMP',12,H-39,11);
  keyHint('A',owned.flip?'BACKFLIP':'LOCKED',204,H-39,owned.flip?10:6);
  txt(owned.shield?(shield?'SHIELD READY':'SHIELD USED'):'ONE HIT / RETRY',364,H-37,shield?12:6,SMALL);
- txt(autoEnabled?'AI AUTO / X TAKE OVER':runAssisted?'PRACTICE / NO HI SCORE':'ATTEMPT '+attempt,12,H-16,runAssisted?11:6,SMALL);
+ txt(autoEnabled?'AI AUTO / X TAKE OVER':runAssisted?'PRACTICE / NO HI SCORE':'LEFT / RIGHT MOVE',12,H-16,runAssisted?11:6,SMALL);
  txt('COMBO '+combo,204,H-16,scorePulse>8?7:combo?10:6,SMALL);
  let next=car&&!car.passed?VEHICLES[car.kind].name:VEHICLES[nextType()].name;
  txt(next,W-12-width(next,SMALL),H-16,7,SMALL);
  if(gradeTime>0&&siuAge===0){
-  let c=lastGrade==='CLEAN'?7:10,gy=105-Math.floor((35-gradeTime)/8),gw=width(lastGrade,HEAD);
-  rectfill(PX+39,gy-3,PX+50+gw,gy+13,0);line(PX+39,gy-3,PX+39,gy+13,c);txt(lastGrade,PX+45,gy,c,HEAD);
+  const c=lastGrade==='CLEAN'?7:10;
+  centeredFeedback(lastGrade,94,c,HEAD);
  }
- if(toastTime>0&&siuAge===0){let w=width(toast);panel(W-w-24,53,w+12,23,toastColor);txt(toast,W-w-18,56,toastColor);}
- if(stage===0&&!endless&&car&&!car.passed&&!car.hit){
+ if(toastTime>0&&siuAge===0)centeredFeedback(toast,56,toastColor,FONT);
+ if(stage===0&&!endless&&jumpAge<0&&car&&!car.passed&&!car.hit){
   let d=VEHICLES[car.kind],eta=(car.x+d.w/2-PX)/car.speed;
-  if(eta>14&&eta<24){let w=width('JUMP',HEAD);rectfill(105,181,117+w,202,0);rect(105,181,117+w,202,10);txt('JUMP',111,187,10,HEAD);}
+  if(eta>14&&eta<24)centeredFeedback('JUMP',123,10,HEAD);
  }
 
 }
@@ -194,7 +197,7 @@ function introDraw(){
  txt('OF 06',43,129,0,SMALL);
  txt(st.name,122,77,10,HEAD);txt(st.tag.toUpperCase(),122,99,11,SMALL);
  const lines=[
- ['Five clean jumps. One hit restarts.','Watch the yellow launch cue.'],
+ ['LEFT / RIGHT move. B jumps traffic.','Five clean jumps. Watch the launch cue.'],
  owned.double?['Bus and duck family: B, then B again.','Wait until descending for your air step.']:['Long pickups and tall vans.','Clear the whole ride before landing.'],
  ['Footballs roll. Basketballs bounce.','Read the height before you jump.'],
  ['Goats may leap. Bears may return.','Santa arrives from the left.'],
@@ -254,15 +257,23 @@ function gameDraw(){
 }
 
 let uiAge=0,scorePulse=0;
+// Feedback uses screen coordinates and measured text widths, never actor positions.
+function centeredFeedback(message,y,accent,font){
+ const metrics=text_size(message,font);
+ const x=Math.floor((screen_size().width-metrics.width)/2);
+ panel(x-6,y-3,metrics.width+12,metrics.height+6,accent);
+ txt(message,x,y,accent,font);
+}
 function siuFeedback(){
- if(!siuAge)return;
- const age=32-siuAge,x=256+Math.round(14*Math.pow(Math.max(0,1-age/6),3));
- // Letter stagger accents the landing without hiding the player or road.
- rectfill(x-10,61,x+193,126,0);rectfill(x-10,61,x-7,126,10);
- const word='SIUUU!';
- for(let i=0;i<word.length;i++)txt(word[i],x+i*13,72+Math.round(Math.sin(Math.max(0,age-i)*.7)*Math.max(0,4-age*.17)),i%2?7:10,HEAD);
- txt('PERFECT LANDING',x,93,7,SMALL);txt('+200  /  CROWD GOES WILD',x,109,10,SMALL);
- line(x,125,x+Math.floor(187*siuAge/32),125,10);
+ if(!owned.siu||!siuAge)return;
+ const W=screen_size().width;
+ const w=Math.max(width('SIUUU!',HEAD),width('PERFECT LANDING',SMALL),width('+200  /  CROWD GOES WILD',SMALL))+20;
+ const x=Math.floor((W-w)/2);
+ panel(x,61,w,66,10);
+ centered('SIUUU!',72,10,HEAD);
+ centered('PERFECT LANDING',93,7,SMALL);
+ centered('+200  /  CROWD GOES WILD',109,10,SMALL);
+ line(x+7,125,x+7+Math.floor((w-15)*siuAge/32),125,10);
 }
 
 function drawCityBus(c){
@@ -300,4 +311,10 @@ function drawCityBus(c){
  }
  // Upper wheel arches sit above the tires; bottom contact stays on the road.
  line(x+20,GROUND-22,x+48,GROUND-22,6);line(x+238,GROUND-22,x+266,GROUND-22,6);
+}
+
+// Continuous alternating steps, aligned to a common foot baseline.
+function drawPlayerWalk(){
+ const frame=Math.floor(walkDistance/8)%8;
+ image_region('player-walk',frame*96,0,96,96,Math.round(PX)-48,GROUND-82,96,96,playerFacing<0);
 }
