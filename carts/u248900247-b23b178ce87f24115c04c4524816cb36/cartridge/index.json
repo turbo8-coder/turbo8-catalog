@@ -1,0 +1,1 @@
+{"cartridgeVersion":"1.0.0","cover":"cover.png","images":[{"file":"images/rom.png","height":2629.0,"id":"rom","name":"rom","width":1024.0}],"name":"Spelunky GBA","resolution":{"height":160.0,"width":240.0},"scripts":["gba_boot.js","gba_code_0.js","gba_tiles.js","keymap.js","game_state.js","render.js","main.js"],"storageId":"gba-fc2bd03e802e","version":"1.4"}
