@@ -377,6 +377,8 @@ def build(root, output, publish=False, unlisted=None):
     manifest['source_commit'] = commit
     require(len(json_bytes(manifest)) <= moderation.MAX_MANIFEST, 'Catalog including visibility history exceeds 1 MiB')
     (output / 'catalog-v2.json').write_bytes(json_bytes(manifest))
+    if publish:
+        cover_assets.publish_catalog(json_bytes(manifest), gh)
     legacy = dict(manifest, cartridges=[x for x in manifest['cartridges'] if x['bytes'] <= 8 * 1024 * 1024])
     (output / 'catalog.json').write_bytes(json_bytes(legacy))
     print(f'Built {len(manifest["cartridges"])} visible entries; retained {len(unlisted)} unlisting records and all release assets.')

@@ -415,9 +415,11 @@ class ModerationTests(unittest.TestCase):
             published = dict(self.manifest(), unlisted=self.unlisted())
             with patch.object(p.moderation, 'current_catalog', return_value=published), \
                     patch.object(p.cover_assets, 'publish'), \
+                    patch.object(p.cover_assets, 'publish_catalog') as mirror, \
                     patch.object(p, 'add_publication_times'), \
                     patch.object(p.subprocess, 'check_output', return_value='a' * 40):
                 p.build(root, Path(tmp) / 'output', publish=True)
+                self.assertEqual(mirror.call_args.args[0], (Path(tmp) / 'output/catalog-v2.json').read_bytes())
             for name in ('catalog-v2.json', 'catalog.json'):
                 result = json.loads((Path(tmp) / 'output' / name).read_text())
                 self.assertEqual([entry['id'] for entry in result['cartridges']], [CART])
@@ -547,6 +549,33 @@ class CoverTests(unittest.TestCase):
 
 
 class PublicationTests(unittest.TestCase):
+    def test_generated_catalog_mirror_updates_only_json_asset(self):
+        raw = p.json_bytes({'schema': 1, 'cartridges': [], 'unlisted': {'retained': True}})
+        state = {'id': 7, 'tag_name': p.cover_assets.TAG, 'draft': False,
+                 'assets': [{'name': 'existing.png', 'size': 1, 'digest': 'sha256:old'}]}
+        calls = []
+        def fake(*args):
+            calls.append(args)
+            if args[:2] == ('release', 'upload'):
+                self.assertIn('--clobber', args)
+                self.assertEqual(Path(args[3]).name, 'catalog-v2.json')
+                self.assertEqual(Path(args[3]).read_bytes(), raw)
+                state['assets'].append({'name': 'catalog-v2.json', 'size': len(raw),
+                                        'digest': 'sha256:' + hashlib.sha256(raw).hexdigest()})
+                return ''
+            return json.dumps(state)
+        with patch.object(p, 'gh', fake):
+            p.cover_assets.publish_catalog(raw, p.gh)
+            p.cover_assets.publish_catalog(raw, p.gh)
+        self.assertEqual(sum(c[:2] == ('release', 'upload') for c in calls), 1)
+        self.assertEqual(state['assets'][0]['name'], 'existing.png')
+
+    def test_catalog_mirror_rejects_failed_upload_verification(self):
+        raw = p.json_bytes({'schema': 1, 'cartridges': []})
+        state = {'id': 7, 'tag_name': p.cover_assets.TAG, 'draft': False, 'assets': []}
+        with patch.object(p, 'gh', return_value=json.dumps(state)), self.assertRaisesRegex(ValueError, 'Catalog mirror failed'):
+            p.cover_assets.publish_catalog(raw, p.gh)
+
     def release_stub(self, existing_bytes=None, draft=True):
         state = {'id': 123, 'tag_name': 'test-tag', 'draft': draft, 'assets': [] if existing_bytes is None else [{'name': 'fixture.zip'}]}
         calls = []

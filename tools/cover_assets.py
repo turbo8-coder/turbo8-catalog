@@ -139,6 +139,33 @@ def publish(covers, commit, gh):
            '-F', 'draft=false', '-f', 'make_latest=false')
 
 
+def publish_catalog(raw, gh):
+    """Mirror the generated directory; curated docs/ is only a build input.
+
+    Unlike hash-named PNGs, this one JSON asset tracks the latest publication.
+    The catalog publication concurrency lock serializes updates and unlistings.
+    """
+    manifest = json.loads(raw)
+    require(manifest.get('schema') == 1 and isinstance(manifest.get('cartridges'), list)
+            and len(raw) <= 1024 * 1024, 'Invalid generated catalog mirror')
+    release = json.loads(gh('api', f'repos/{REPO}/releases/tags/{TAG}'))
+    require(release.get('tag_name') == TAG and type(release.get('id')) is int
+            and not release.get('draft', True), 'Cover Release must be published first')
+    name = 'catalog-v2.json'
+    digest = 'sha256:' + hashlib.sha256(raw).hexdigest()
+    asset = next((a for a in release.get('assets', []) if a['name'] == name), {})
+    if asset.get('size') == len(raw) and asset.get('digest') == digest:
+        return
+    with tempfile.TemporaryDirectory(prefix='turbo8-catalog-mirror-') as tmp:
+        path = Path(tmp) / name
+        path.write_bytes(raw)
+        gh('release', 'upload', TAG, str(path), '--repo', REPO, '--clobber')
+    fresh = json.loads(gh('api', f'repos/{REPO}/releases/{release["id"]}'))
+    asset = next((a for a in fresh.get('assets', []) if a['name'] == name), {})
+    require(asset.get('size') == len(raw) and asset.get('digest') == digest,
+            'Catalog mirror failed size/SHA-256 verification')
+
+
 def verify(entries, base):
     """Check actual public delivery, not only the catalog JSON."""
     def check(entry):
